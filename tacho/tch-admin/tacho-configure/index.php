@@ -1,70 +1,143 @@
 <?php
-  $dbHost = trim($_POST["db_host"] ?? "localhost");
-  $dbName = trim($_POST["db_name"] ?? "");
-  $dbUser = trim($_POST["db_user"] ?? "admin");
-  $dbPassword = $_POST["db_password"] ?? "";
-  $error = "";
-  $warning = "";
+declare(strict_types=1);
 
-  if ($_SERVER["REQUEST_METHOD"] === "POST") {
-    if ($dbHost === "" || $dbName === "" || $dbUser === "") {
-      $error = "Preencha os campos!";
-    } else {
-      if ($dbPassword === "") {
-        $warning = "Deixar o banco de dados sem senha é um perigo sem freio! coloque uma senha pra proteger seu site!";
-      } else {
-        try {
-          $dsn = "mysql:host=" . $dbHost . ";dbname=" . $dbName . ";charset=utf8mb4";
-          $pdo = new PDO($dsn, $dbUser, $dbPassword, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-          ]);
-          header("Location: ../tacho-site-configure/index.php");
-        } catch (PDOException $e) {
-          $error = "Falha. Motivo: " . $e->getMessage();
-        }
-      }
+session_start();
+
+$jsonPath = __DIR__ . '/../../websitedata.json';
+$message = '';
+$error = '';
+
+/**
+ * Lê ../../websitedata.json como array (ou [] se ainda não existir).
+ *
+ * @return array<string, mixed>
+ */
+function loadWebsiteData(string $path): array
+{
+    if (!is_file($path)) {
+        return [];
     }
-  }
+
+    $raw = file_get_contents($path);
+    if ($raw === false || trim($raw) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+/**
+ * Faz merge e salva em ../../websitedata.json com lock exclusivo e UTF-8 limpo.
+ *
+ * @param array<string, mixed> $patch
+ */
+function saveWebsiteData(string $path, array $patch): bool
+{
+    $dir = dirname($path);
+    if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+        return false;
+    }
+
+    $fp = fopen($path, 'c+');
+    if ($fp === false) {
+        return false;
+    }
+
+    try {
+        if (!flock($fp, LOCK_EX)) {
+            return false;
+        }
+
+        rewind($fp);
+        $currentRaw = stream_get_contents($fp);
+        $currentData = [];
+
+        if (is_string($currentRaw) && trim($currentRaw) !== '') {
+            $decoded = json_decode($currentRaw, true);
+            if (is_array($decoded)) {
+                $currentData = $decoded;
+            }
+        }
+
+        $merged = array_replace_recursive($currentData, $patch);
+        $json = json_encode(
+            $merged,
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+        );
+
+        if ($json === false) {
+            return false;
+        }
+
+        ftruncate($fp, 0);
+        rewind($fp);
+        fwrite($fp, $json . PHP_EOL);
+        fflush($fp);
+        flock($fp, LOCK_UN);
+
+        return true;
+    } finally {
+        fclose($fp);
+    }
+}
+
+$existingData = loadWebsiteData($jsonPath);
+$existingAdminUser = (string)($existingData['admin']['username'] ?? '');
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $adminUser = trim((string)($_POST['admin_username'] ?? ''));
+    $adminPass = (string)($_POST['admin_password'] ?? '');
+
+    if ($adminUser === '' || $adminPass === '') {
+        $error = 'Preencha o usuário e a senha do administrador.';
+    } else {
+        $payload = [
+            'admin' => [
+                'username' => $adminUser,
+                'password_hash' => password_hash($adminPass, PASSWORD_DEFAULT),
+                'updated_at' => date('c'),
+            ],
+        ];
+
+        if (saveWebsiteData($jsonPath, $payload)) {
+            $message = 'Dados do administrador salvos em ../../websitedata.json! ✅';
+            $existingData = loadWebsiteData($jsonPath);
+            $existingAdminUser = (string)($existingData['admin']['username'] ?? $adminUser);
+        } else {
+            $error = 'Não foi possível gravar ../../websitedata.json. Verifique as permissões da pasta.';
+        }
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8">
-  <title>Configurar Banco — Tacho</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configurar Admin — Tacho</title>
 </head>
 <body>
-  <h1>Configurar Banco de Dados — Tacho</h1>
+    <h1>⚙️ Configuração do Administrador</h1>
 
-  <?php if ($error !== ""): ?>
-    <p><?= htmlspecialchars($error, ENT_QUOTES, "UTF-8") ?></p>
-  <?php endif; ?>
+    <?php if ($message !== ''): ?>
+        <p><?= htmlspecialchars($message, ENT_QUOTES, 'UTF-8') ?></p>
+    <?php endif; ?>
 
-  <?php if ($warning !== ""): ?>
-    <p><?= htmlspecialchars($warning, ENT_QUOTES, "UTF-8") ?></p>
-  <?php endif; ?>
+    <?php if ($error !== ''): ?>
+        <p><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></p>
+    <?php endif; ?>
 
-  <form method="POST" action="">
-    <label>
-      Local do banco (host):<br>
-      <input type="text" name="db_host" value="<?= htmlspecialchars($dbHost, ENT_QUOTES, "UTF-8") ?>">
-    </label><br><br>
+    <form method="post" action="">
+        <label for="admin_username">Usuário admin</label><br>
+        <input type="text" id="admin_username" name="admin_username" value="<?= htmlspecialchars($existingAdminUser, ENT_QUOTES, 'UTF-8') ?>" required><br><br>
 
-    <label>
-      Nome do banco de dados:<br>
-      <input type="text" name="db_name" value="<?= htmlspecialchars($dbName, ENT_QUOTES, "UTF-8") ?>">
-    </label><br><br>
+        <label for="admin_password">Senha admin</label><br>
+        <input type="password" id="admin_password" name="admin_password" required><br><br>
 
-    <label>
-      Usuário do banco:<br>
-      <input type="text" name="db_user" value="<?= htmlspecialchars($dbUser, ENT_QUOTES, "UTF-8") ?>">
-    </label><br><br>
+        <button type="submit">Salvar em websitedata.json</button>
+    </form>
 
-    <label>
-      Senha do banco:<br>
-      <input type="password" name="db_password">
-    </label><br><br>
-
-    <button type="submit">Salvar configuração</button>
-  </form>
+    <p><a href="../tacho-site-configure/index.php">Ir para configuração do site →</a></p>
 </body>
 </html>
